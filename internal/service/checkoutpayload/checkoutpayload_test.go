@@ -260,6 +260,71 @@ func TestBuildUsesCatalogWeightForCheckoutItem(t *testing.T) {
 	}
 }
 
+// The basket response lists chosen option values by id and count only; Wolt does
+// not echo their prices. Build must recover them from the venue catalog instead
+// of rejecting the basket as "incomplete".
+func TestBuildRecoversOptionValuePricesFromCatalog(t *testing.T) {
+	const itemID = "000000000000000000000412"
+	basket := basketWithItem("EUR 16.50", map[string]any{
+		"id":          itemID,
+		"count":       1,
+		"price":       1200,
+		"category_id": "synthetic-category",
+		"options": []any{
+			map[string]any{
+				"id":     "item-grp-protein",
+				"values": []any{map[string]any{"id": "val-chicken", "count": 1}},
+			},
+		},
+	})
+	basket["venue"].(map[string]any)["slug"] = "synthetic-kitchen"
+	basket["venue"].(map[string]any)["currency"] = "EUR"
+	api := &fakeAPI{
+		assortmentFn: func(context.Context, string) (map[string]any, error) {
+			return map[string]any{"options": []any{
+				map[string]any{
+					"id": "item-grp-protein",
+					"values": []any{
+						map[string]any{"id": "val-chicken", "name": "chicken", "price": 450},
+					},
+				},
+			}}, nil
+		},
+	}
+
+	payload, warnings, err := Build(context.Background(), api, nil, basket, domain.Location{}, "standard", 0, "")
+	if err != nil {
+		t.Fatalf("Build() error = %v (warnings: %v)", err, warnings)
+	}
+	item := firstMenuItem(t, purchasePlan(t, payload))
+	option := item["options"].([]any)[0].(map[string]any)
+	value := option["values"].([]any)[0].(map[string]any)
+	if value["price"] != 450 {
+		t.Fatalf("option value price = %v, want 450 recovered from the catalog", value["price"])
+	}
+}
+
+// With no catalog price to recover, the basket is still rejected rather than
+// previewed with a guessed price.
+func TestBuildStillRejectsOptionValueWithoutAnyPrice(t *testing.T) {
+	basket := basketWithItem("EUR 12.00", map[string]any{
+		"id":          "000000000000000000000413",
+		"count":       1,
+		"price":       1200,
+		"category_id": "synthetic-category",
+		"options": []any{
+			map[string]any{
+				"id":     "item-grp-protein",
+				"values": []any{map[string]any{"id": "val-unknown", "count": 1}},
+			},
+		},
+	})
+	_, _, err := Build(context.Background(), &fakeAPI{}, nil, basket, domain.Location{}, "standard", 0, "")
+	if err == nil || !strings.Contains(err.Error(), "has no current price") {
+		t.Fatalf("Build() error = %v, want \"has no current price\"", err)
+	}
+}
+
 func TestBuildCheckoutOptionsOnlyOverridesKnownDetailPrices(t *testing.T) {
 	raw := []any{
 		map[string]any{

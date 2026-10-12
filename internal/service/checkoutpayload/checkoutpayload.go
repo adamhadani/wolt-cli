@@ -236,12 +236,6 @@ func Build(
 		if count <= 0 {
 			count = 1
 		}
-		replacement, replacementErr := payloadutil.BuildBasketUpsertItem(item, count)
-		if replacementErr != nil {
-			return nil, warnings, fmt.Errorf("basket cannot be used for checkout preview: %w", replacementErr)
-		}
-		price := payloadutil.MinorAmount(replacement["price"])
-
 		detail := map[string]any{}
 		if wolt != nil {
 			if cached, ok := itemDetails[itemID]; ok {
@@ -257,6 +251,15 @@ func Build(
 				warnings = append(warnings, fmt.Sprintf("unable to enrich checkout payload for item %s; using basket defaults", itemID))
 			}
 		}
+
+		// Wolt's basket response lists chosen option values by id and count only,
+		// so their prices come from the catalog payloads loaded above.
+		item = withOptionValuePrices(item, optionValuePrices(detail, catalogPayloads(), assortmentPayload))
+		replacement, replacementErr := payloadutil.BuildBasketUpsertItem(item, count)
+		if replacementErr != nil {
+			return nil, warnings, fmt.Errorf("basket cannot be used for checkout preview: %w", replacementErr)
+		}
+		price := payloadutil.MinorAmount(replacement["price"])
 
 		// A payload that carries the item but no category is not authoritative
 		// for the category, so resolution continues to the next candidate
@@ -617,6 +620,79 @@ func resolveCheckoutCategoryIDs(item map[string]any, categoryID string) []any {
 		}
 	}
 	return categoryIDs
+}
+
+// optionValuePrices merges the option value price indexes of every payload that
+// may describe the item; earlier payloads win.
+func optionValuePrices(payloads ...any) map[string]int {
+	merged := map[string]int{}
+	add := func(payload map[string]any) {
+		for valueID, price := range buildOptionValuePriceIndex(payload) {
+			if _, exists := merged[valueID]; !exists {
+				merged[valueID] = price
+			}
+		}
+	}
+	for _, raw := range payloads {
+		switch typed := raw.(type) {
+		case map[string]any:
+			add(typed)
+		case []map[string]any:
+			for _, payload := range typed {
+				add(payload)
+			}
+		}
+	}
+	return merged
+}
+
+// withOptionValuePrices returns a copy of the basket line in which option
+// values that carry no price get the catalog price. Values without any known
+// price stay unpriced so BuildBasketUpsertItem still rejects them.
+func withOptionValuePrices(line map[string]any, prices map[string]int) map[string]any {
+	options := payloadutil.Slice(line["options"])
+	if len(options) == 0 || len(prices) == 0 {
+		return line
+	}
+	filledOptions := make([]any, 0, len(options))
+	for _, rawOption := range options {
+		option := payloadutil.Map(rawOption)
+		if option == nil {
+			filledOptions = append(filledOptions, rawOption)
+			continue
+		}
+		filledValues := make([]any, 0, len(payloadutil.Slice(option["values"])))
+		for _, rawValue := range payloadutil.Slice(option["values"]) {
+			value := payloadutil.Map(rawValue)
+			if value == nil {
+				filledValues = append(filledValues, rawValue)
+				continue
+			}
+			if _, has := value["price"]; !has || value["price"] == nil {
+				if price, known := prices[strings.TrimSpace(payloadutil.String(value["id"]))]; known {
+					copied := make(map[string]any, len(value)+1)
+					for key, val := range value {
+						copied[key] = val
+					}
+					copied["price"] = price
+					value = copied
+				}
+			}
+			filledValues = append(filledValues, value)
+		}
+		copiedOption := make(map[string]any, len(option))
+		for key, val := range option {
+			copiedOption[key] = val
+		}
+		copiedOption["values"] = filledValues
+		filledOptions = append(filledOptions, copiedOption)
+	}
+	copiedLine := make(map[string]any, len(line))
+	for key, val := range line {
+		copiedLine[key] = val
+	}
+	copiedLine["options"] = filledOptions
+	return copiedLine
 }
 
 func buildOptionValuePriceIndex(detail map[string]any) map[string]int {
