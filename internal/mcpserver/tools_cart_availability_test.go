@@ -493,3 +493,73 @@ func TestCartShowMarksExistingBasketScheduledOnly(t *testing.T) {
 		t.Fatalf("order availability = %#v", availability)
 	}
 }
+
+// Wolt's basket response lists selected option values without prices, and a
+// removal sends every remaining line back, so the remaining lines must carry
+// the catalog prices of their option values.
+func TestCartRemovePricesRemainingOptionValuesFromCatalog(t *testing.T) {
+	const (
+		itemID  = "000000000000000000000141"
+		otherID = "000000000000000000000142"
+	)
+	var captured map[string]any
+	wolt := &stubWolt{
+		venueStaticFn: func(context.Context, string) (map[string]any, error) {
+			return nil, errors.New("static unavailable")
+		},
+		venueDynamicFn: func(context.Context, string, woltgateway.VenuePageDynamicOptions) (map[string]any, error) {
+			return nil, errors.New("dynamic unavailable")
+		},
+		assortmentFn: func(_ context.Context, slug string) (map[string]any, error) {
+			if slug != scheduledVenueSlug {
+				return nil, errors.New("unexpected slug " + slug)
+			}
+			return map[string]any{"options": []any{map[string]any{
+				"id":     "lib-extras",
+				"values": []any{map[string]any{"id": "val-feta", "price": 400}},
+			}}}, nil
+		},
+		basketsPageFn: func(context.Context, domain.Location, woltgateway.AuthContext) (map[string]any, error) {
+			return map[string]any{"baskets": []any{
+				map[string]any{
+					"id":         "basket-1",
+					"venue_id":   scheduledVenueID,
+					"venue_slug": scheduledVenueSlug,
+					"currency":   scheduledVenueCurrency,
+					"items": []any{
+						map[string]any{"id": itemID, "count": 1, "price": 500},
+						map[string]any{"id": otherID, "count": 1, "price": 1890, "options": []any{
+							map[string]any{"id": "grp-extras", "values": []any{map[string]any{"id": "val-feta", "count": 1}}},
+						}},
+					},
+				},
+			}}, nil
+		},
+		addToBasketFn: func(_ context.Context, payload map[string]any, _ woltgateway.AuthContext) (map[string]any, error) {
+			captured = payload
+			return map[string]any{}, nil
+		},
+	}
+	tc := newToolCtx(Deps{
+		Wolt:     wolt,
+		Profiles: &stubProfiles{profile: domain.Profile{Name: "default", WToken: "token"}},
+	})
+
+	if _, _, err := tc.handleCartRemove(context.Background(), nil, CartRemoveInput{
+		LocationInput: LocationInput{Lat: fixtureLocationLat, Lon: fixtureLocationLon},
+		Venue:         scheduledVenueSlug,
+		ItemID:        itemID,
+		Count:         1,
+	}); err != nil {
+		t.Fatalf("handleCartRemove: %v", err)
+	}
+	items := asSlice(captured["items"])
+	if len(items) != 1 {
+		t.Fatalf("posted items = %#v, want only the line with options", captured["items"])
+	}
+	option := asMap(asSlice(asMap(items[0])["options"])[0])
+	value := asMap(asSlice(option["values"])[0])
+	if asString(option["id"]) != "grp-extras" || asString(value["id"]) != "val-feta" || asInt(value["price"]) != 400 {
+		t.Fatalf("remaining option = %#v, want grp-extras/val-feta priced 400", option)
+	}
+}

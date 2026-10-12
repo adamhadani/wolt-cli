@@ -7,6 +7,7 @@ import (
 
 	"github.com/mekedron/wolt-cli/internal/domain"
 	woltgateway "github.com/mekedron/wolt-cli/internal/gateway/wolt"
+	"github.com/mekedron/wolt-cli/internal/service/basketprices"
 	"github.com/mekedron/wolt-cli/internal/service/catalogitem"
 	"github.com/mekedron/wolt-cli/internal/service/output"
 	"github.com/mekedron/wolt-cli/internal/service/payloadutil"
@@ -579,6 +580,11 @@ func newCartAddCommand(deps Dependencies) *cobra.Command {
 				},
 			}
 
+			if selectedBasket != nil {
+				var priceWarnings []string
+				selectedBasket, priceWarnings = basketprices.Fill(cmd.Context(), deps.Wolt, selectedBasket)
+				warnings = append(warnings, priceWarnings...)
+			}
 			mergedItems := []any{newLineItem}
 			if weightConfig, weighted := payloadutil.WeightConfigFromItem(itemPayload); weighted {
 				mergedItems, err = payloadutil.MergeWeightedBasketItems(selectedBasket, itemID, count, newLineItem, weightConfig)
@@ -882,6 +888,7 @@ func newCartRemoveCommand(deps Dependencies) *cobra.Command {
 			if all {
 				removeCount = 0
 			}
+			selected, priceWarnings := basketprices.Fill(cmd.Context(), deps.Wolt, selected)
 			remainingItems, removedCount, removeErr := payloadutil.RemoveBasketItems(
 				selected,
 				itemID,
@@ -939,7 +946,7 @@ func newCartRemoveCommand(deps Dependencies) *cobra.Command {
 			}
 
 			mutation := "remove"
-			mutationWarnings := []string{}
+			mutationWarnings := append([]string{}, priceWarnings...)
 			if len(remainingItems) == 0 {
 				if basketID == "" {
 					return emitError(
