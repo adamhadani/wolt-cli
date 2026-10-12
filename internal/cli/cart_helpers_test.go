@@ -332,6 +332,19 @@ func TestBuildItemPayloadFromAssortment(t *testing.T) {
 	}
 }
 
+func TestBasketOptionsTotalSumsPaidValues(t *testing.T) {
+	options := []any{
+		map[string]any{"id": "protein", "values": []any{map[string]any{"id": "chicken", "count": 1, "price": 450}}},
+		map[string]any{"id": "extras", "values": []any{map[string]any{"id": "sauce", "count": 2, "price": 75}, map[string]any{"id": "free", "count": 1, "price": 0}}},
+	}
+	if got := basketOptionsTotal(options); got != 600 {
+		t.Fatalf("basketOptionsTotal() = %d, want 600", got)
+	}
+	if got := basketOptionsTotal(nil); got != 0 {
+		t.Fatalf("basketOptionsTotal(nil) = %d, want 0", got)
+	}
+}
+
 func TestBuildItemPayloadFromAssortmentMatchesUppercaseID(t *testing.T) {
 	const itemID = "abcdefabcdefabcdefabcdef"
 	payload := buildItemPayloadFromAssortment(

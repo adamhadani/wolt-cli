@@ -174,6 +174,18 @@ func buildBasketOptions(
 	return options, nil
 }
 
+// basketOptionsTotal sums price * count over the selected option values.
+func basketOptionsTotal(options []any) int {
+	total := 0
+	for _, rawOption := range options {
+		for _, rawValue := range asSlice(asMap(rawOption)["values"]) {
+			value := asMap(rawValue)
+			total += asInt(value["price"]) * asInt(value["count"])
+		}
+	}
+	return total
+}
+
 func extractOptionSpecs(payload map[string]any) map[string]payloadutil.OptionGroupSpec {
 	return payloadutil.ExtractOptionSpecs(payload)
 }
