@@ -32,6 +32,7 @@ type OptionValueSpec struct {
 
 type OptionGroupSpec struct {
 	ID        string
+	OptionID  string // shared option-library id, when it differs from ID
 	Name      string
 	Required  bool
 	MinSelect int
@@ -594,6 +595,9 @@ func ExtractOptionSpecs(payload map[string]any) map[string]OptionGroupSpec {
 		if spec.ID == "" {
 			spec.ID = canonicalGroupID
 			spec.Values = map[string]OptionValueSpec{}
+		}
+		if libraryID := strings.TrimSpace(String(group["option_id"])); spec.OptionID == "" && libraryID != "" && !strings.EqualFold(libraryID, canonicalGroupID) {
+			spec.OptionID = libraryID
 		}
 		if spec.Name == "" {
 			spec.Name = String(CoalesceAny(group["name"], group["title"]))
