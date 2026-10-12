@@ -332,6 +332,60 @@ func TestBuildItemPayloadFromAssortment(t *testing.T) {
 	}
 }
 
+// Wolt keys a dish's options by an item-level "id" and points at the shared
+// library group through "option_id". The basket API (and the Wolt app) only
+// recognise the item-level id, so the group sent in the basket must carry it.
+func TestBuildBasketOptionsUsesItemLevelOptionGroupID(t *testing.T) {
+	assortment := map[string]any{
+		"items": []any{
+			map[string]any{
+				"id":    "item-1",
+				"name":  "Make Your Own Pasta",
+				"price": 1200,
+				"options": []any{
+					map[string]any{"id": "item-grp-pasta", "option_id": "lib-grp-pasta", "name": "Choose your pasta"},
+				},
+			},
+		},
+		"options": []any{
+			map[string]any{
+				"id":   "lib-grp-pasta",
+				"name": "Choose your pasta",
+				"values": []any{
+					map[string]any{"id": "val-penne", "name": "penne", "price": 0},
+					map[string]any{"id": "val-linguine", "name": "linguine", "price": 0},
+				},
+			},
+		},
+	}
+	itemPayload := buildItemPayloadFromAssortment(assortment, "item-1")
+	if itemPayload == nil {
+		t.Fatalf("expected assortment payload for item")
+	}
+
+	for _, group := range []string{"item-grp-pasta", "lib-grp-pasta", "Choose your pasta"} {
+		t.Run(group, func(t *testing.T) {
+			options, err := buildBasketOptions(itemPayload, map[string][]optionSelection{
+				group: {{ValueID: "val-linguine", Count: 1}},
+			})
+			if err != nil {
+				t.Fatalf("buildBasketOptions() error = %v", err)
+			}
+			if len(options) != 1 {
+				t.Fatalf("expected one option group, got %#v", options)
+			}
+			got := asMap(options[0])
+			if asString(got["id"]) != "item-grp-pasta" {
+				t.Fatalf("basket option group id = %v, want item-level id item-grp-pasta", got["id"])
+			}
+			values := asSlice(got["values"])
+			if len(values) != 1 || asString(asMap(values[0])["id"]) != "val-linguine" {
+				t.Fatalf("unexpected values: %#v", values)
+			}
+		})
+	}
+}
+
 func TestBasketOptionsTotalSumsPaidValues(t *testing.T) {
 	options := []any{
 		map[string]any{"id": "protein", "values": []any{map[string]any{"id": "chicken", "count": 1, "price": 450}}},
