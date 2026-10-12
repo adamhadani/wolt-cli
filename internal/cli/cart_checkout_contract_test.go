@@ -499,9 +499,11 @@ func TestCartAddKeepsFallbackCountsConfiguredTotalAndNestedPrices(t *testing.T) 
 	}
 	added := asMap(items[1])
 	if asString(added["name"]) != "Fresh configured item" ||
-		asInt(added["price"]) != 500 {
+		asInt(added["price"]) != 700 {
 		t.Fatalf("fresh line metadata = %#v", added)
 	}
+	// The saved line price is the base price (500) plus the selected paid option
+	// values (2 x 100), so the cart and checkout preview agree.
 	option := asMap(asSlice(added["options"])[0])
 	value := asMap(asSlice(option["values"])[0])
 	if asInt(value["price"]) != 100 || asInt(value["count"]) != 2 {
@@ -515,8 +517,8 @@ func TestCartAddKeepsFallbackCountsConfiguredTotalAndNestedPrices(t *testing.T) 
 	if asInt(data["total_items"]) != 6 {
 		t.Fatalf("fallback total_items = %v, want 6", data["total_items"])
 	}
-	if got := asInt(asMap(data["total"])["amount"]); got != 1500 {
-		t.Fatalf("fallback total = %d, want configured target-basket total 1500", got)
+	if got := asInt(asMap(data["total"])["amount"]); got != 1700 {
+		t.Fatalf("fallback total = %d, want configured target-basket total 1700 (fresh line 700 incl. options)", got)
 	}
 }
 

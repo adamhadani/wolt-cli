@@ -562,11 +562,17 @@ func newCartAddCommand(deps Dependencies) *cobra.Command {
 					warnings,
 				)
 			}
+			// Wolt stores the unit price of a basket line including its paid option
+			// values (the app does the same). Weighted lines are priced by weight.
+			linePrice := price
+			if _, weighted := payloadutil.WeightConfigFromItem(itemPayload); !weighted {
+				linePrice += basketOptionsTotal(options)
+			}
 			newLineItem := map[string]any{
 				"id":      itemID,
 				"count":   count,
 				"name":    name,
-				"price":   price,
+				"price":   linePrice,
 				"options": options,
 				"substitution_settings": map[string]any{
 					"is_allowed": allowSubstitutions,
