@@ -366,6 +366,20 @@ minimum/maximum selection counts are validated before the mutation, and
 explicitly free option values remain distinct from values whose price metadata
 is missing.
 
+A restaurant dish names each option group by its own item-level ID and takes
+the values from a shared library group; `venue menu --include-options` lists
+the library ID, `venue item` the item-level ID. `--option` accepts either, and
+the basket always stores the item-level ID, the only one the Wolt app shows as
+selected. When a dish uses one library group more than once (pick one, two or
+three toppings), the library ID is ambiguous and the error lists the
+item-level IDs to choose from. The saved line price is the dish price plus the
+selected paid option values, so `wolt cart` and `wolt checkout` agree.
+
+Wolt's basket responses list selected option values without their prices.
+`cart add`, `cart remove` and `checkout` send every line back, so they take the
+missing prices from the venue catalog and refuse the change when a selected
+value has no price anywhere.
+
 If `--count` is omitted, the API treats the call as "add one of this
 line." `--all` on remove/clear targets every basket the user holds.
 
