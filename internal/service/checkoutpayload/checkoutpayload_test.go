@@ -367,7 +367,7 @@ func TestBuildCheckoutOptionsOnlyOverridesKnownDetailPrices(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			options := buildCheckoutOptions(raw, buildOptionValuePriceIndex(test.detail))
+			options := buildCheckoutOptions(raw, payloadutil.OptionValuePriceIndex(test.detail))
 			option := options[0].(map[string]any)
 			value := option["values"].([]any)[0].(map[string]any)
 			if value["price"] != test.want {

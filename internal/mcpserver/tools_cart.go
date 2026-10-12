@@ -9,6 +9,7 @@ import (
 
 	"github.com/mekedron/wolt-cli/internal/domain"
 	woltgateway "github.com/mekedron/wolt-cli/internal/gateway/wolt"
+	"github.com/mekedron/wolt-cli/internal/service/basketprices"
 	"github.com/mekedron/wolt-cli/internal/service/catalogitem"
 	"github.com/mekedron/wolt-cli/internal/service/observability"
 	"github.com/mekedron/wolt-cli/internal/service/payloadutil"
@@ -290,6 +291,10 @@ func (tc *ToolCtx) handleCartAdd(ctx context.Context, _ *mcp.CallToolRequest, in
 		},
 	}
 
+	var priceWarnings []string
+	if existingBasket != nil {
+		existingBasket, priceWarnings = basketprices.Fill(ctx, tc.wolt, existingBasket)
+	}
 	mergedItems := []any{newLine}
 	if weightConfig, weighted := payloadutil.WeightConfigFromItem(itemPayload); weighted {
 		mergedItems, err = payloadutil.MergeWeightedBasketItems(existingBasket, in.ItemID, count, newLine, weightConfig)
@@ -330,7 +335,7 @@ func (tc *ToolCtx) handleCartAdd(ctx context.Context, _ *mcp.CallToolRequest, in
 		Added:             count,
 		OrderAvailability: orderAvailability,
 		Response:          resp,
-		Warnings:          availabilityWarnings,
+		Warnings:          append(priceWarnings, availabilityWarnings...),
 	}, nil
 }
 
@@ -384,6 +389,7 @@ func (tc *ToolCtx) handleCartRemove(ctx context.Context, _ *mcp.CallToolRequest,
 	if basket == nil {
 		return nil, CartRemoveOutput{}, toolErrf("no basket found for venue %s", ref.ID)
 	}
+	basket, _ = basketprices.Fill(ctx, tc.wolt, basket)
 	remainingItems, removed, err := payloadutil.RemoveBasketItems(basket, in.ItemID, in.Count)
 	if err != nil {
 		return nil, CartRemoveOutput{}, toolErrf("item quantity was not changed: %v", err)

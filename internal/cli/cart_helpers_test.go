@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -515,5 +516,82 @@ func TestNeedsVenueContentFallback(t *testing.T) {
 	}
 	if needsVenueContentFallback(regularAssortment, "venue-1") {
 		t.Fatalf("did not expect full assortment to require venue-content fallback")
+	}
+}
+
+// One library group can back several groups of the same dish ("pick 1, 2 or
+// 3 toppings"). Each item-level group must stay selectable on its own, and the
+// shared library id no longer names a single group.
+func TestBuildBasketOptionsKeepsGroupsSharingALibraryGroupApart(t *testing.T) {
+	assortment := map[string]any{
+		"items": []any{
+			map[string]any{
+				"id":    "item-vegan",
+				"name":  "Vegan Choice",
+				"price": 1350,
+				"options": []any{
+					map[string]any{"id": "grp-one-topping", "option_id": "lib-toppings", "name": "Toppings"},
+					map[string]any{"id": "grp-two-toppings", "option_id": "lib-toppings", "name": "Toppings"},
+					map[string]any{"id": "grp-extras", "option_id": "lib-extras", "name": "Extras"},
+				},
+			},
+		},
+		"options": []any{
+			map[string]any{
+				"id":   "lib-toppings",
+				"name": "Toppings",
+				"values": []any{
+					map[string]any{"id": "val-olive", "name": "Olive", "price": 0},
+					map[string]any{"id": "val-onion", "name": "Onion", "price": 0},
+				},
+			},
+			map[string]any{
+				"id":     "lib-extras",
+				"name":   "Extras",
+				"values": []any{map[string]any{"id": "val-feta", "name": "Feta", "price": 400}},
+			},
+		},
+	}
+	itemPayload := buildItemPayloadFromAssortment(assortment, "item-vegan")
+	if itemPayload == nil {
+		t.Fatalf("expected assortment payload for item")
+	}
+
+	options, err := buildBasketOptions(itemPayload, map[string][]optionSelection{
+		"grp-one-topping":  {{ValueID: "val-olive", Count: 1}},
+		"grp-two-toppings": {{ValueID: "val-onion", Count: 2}},
+		"lib-extras":       {{ValueID: "val-feta", Count: 1}},
+	})
+	if err != nil {
+		t.Fatalf("buildBasketOptions() error = %v", err)
+	}
+	got := map[string]string{}
+	for _, rawOption := range options {
+		option := asMap(rawOption)
+		values := asSlice(option["values"])
+		if len(values) != 1 {
+			t.Fatalf("unexpected values for %v: %#v", option["id"], values)
+		}
+		got[asString(option["id"])] = asString(asMap(values[0])["id"])
+	}
+	want := map[string]string{
+		"grp-one-topping":  "val-olive",
+		"grp-two-toppings": "val-onion",
+		"grp-extras":       "val-feta",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("basket option groups = %v, want %v", got, want)
+	}
+
+	for token, wantErr := range map[string]string{
+		"lib-toppings": "use one of their IDs: grp-one-topping, grp-two-toppings",
+		"Toppings":     "ambiguous option group",
+	} {
+		_, err := buildBasketOptions(itemPayload, map[string][]optionSelection{
+			token: {{ValueID: "val-olive", Count: 1}},
+		})
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("token %q: error = %v, want it to contain %q", token, err, wantErr)
+		}
 	}
 }
