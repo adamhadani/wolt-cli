@@ -48,6 +48,12 @@ readonly WEIGHTED_VENUE="${WOLT_SMOKE_WEIGHTED_VENUE:-}"
 # Units added for the weighted leg. Must stay above 1 so removing one unit is a
 # genuine partial removal rather than dropping the whole line.
 readonly WEIGHTED_STEPS=2
+# Units added for the option-groups leg. Must stay above 1 so removing one unit
+# rebuilds the remaining line, which needs the option value prices Wolt leaves
+# out of basket responses.
+readonly OPTIONS_COUNT=2
+# Upper bound on item-endpoint probes while looking for an option-groups fixture.
+readonly OPTIONS_MAX_PROBES=12
 
 # wolt-mcp powers the MCP checkout-preview smoke — the code path PR #23 fixed
 # (the MCP handler used to POST a flat body Wolt rejected for a missing
@@ -544,16 +550,18 @@ discover_cart_fixture() {
   return 1
 }
 
-# cart_add_discovered "<venue-id>" "<item-id>" adds a preflighted live item
-# using the canonical identities verified above. If the item disappears
+# cart_add_discovered "<venue-id>" "<item-id>" [count] [label] [cart add flags...]
+# adds a preflighted live item using the canonical identities verified above. If the item disappears
 # between preflight and mutation, classify that race as a skipped prerequisite.
 cart_add_discovered() {
   local venue_id="$1" item_id="$2" count="${3:-1}" label="${4:-cart add}"
+  local -a extra_args=("${@:5}")
   local slug="${label// /_}"
   local out="${SMOKE_DIR}/${slug}.json"
   local err="${SMOKE_DIR}/${slug}.err"
   printf "[%s] %-22s ... " "$(date -u +%H:%M:%S)" "${label}"
-  if "${WOLT_BIN}" cart add "${venue_id}" "${item_id}" --count "${count}" --format json \
+  if "${WOLT_BIN}" cart add "${venue_id}" "${item_id}" --count "${count}" \
+    ${extra_args[@]+"${extra_args[@]}"} --format json \
     >"${out}" 2>"${err}"; then
     if ! is_cart_add_envelope "${out}" "${item_id}" "${venue_id}"; then
       printf "FAIL (invalid cart-add envelope)\n"
@@ -783,6 +791,142 @@ assert_weighted_partial_removal_refused() {
   return 1
 }
 
+# discover_options_fixture prints
+# "<venue-id><TAB><item-id><TAB><library-group-id><TAB><value-id><TAB><value-price>"
+# for the first orderable dish whose menu entry lists exactly one option group,
+# with no required selection and a paid value. The menu lists that group by its
+# shared library id, the id a user copies from `venue menu --include-options`;
+# the dish itself names the group by a separate item-level id, which is the
+# only one the Wolt app recognises in a basket. An empty result is a missing
+# live prerequisite rather than a product failure.
+discover_options_fixture() {
+  local -a candidates=()
+  local venue resolved_venue_id item library_group fixture
+  local probes=0
+  if [ -n "${CART_VENUE}" ]; then
+    candidates+=("${CART_VENUE}")
+  else
+    while IFS= read -r venue; do
+      if [ -n "${venue}" ]; then
+        candidates+=("${venue}")
+      fi
+    done < <(
+      jq -r '.data.items[]? | .slug // empty' "${SMOKE_DIR}/venues_open.json" 2>/dev/null \
+        | head -10
+    )
+  fi
+
+  for venue in "${candidates[@]}"; do
+    load_venue_menu "${venue}" --include-options --format json \
+      >"${SMOKE_DIR}/options_menu.json" 2>/dev/null || continue
+    if ! is_menu_envelope "${SMOKE_DIR}/options_menu.json"; then
+      continue
+    fi
+    resolved_venue_id="$(
+      jq -r '.data.venue_id // empty' "${SMOKE_DIR}/options_menu.json" 2>/dev/null || true
+    )"
+    if [ -z "${resolved_venue_id}" ]; then
+      continue
+    fi
+    # Skip anything already in this venue's basket so cleanup never touches a
+    # line the user put there.
+    if ! "${WOLT_BIN}" cart --venue-id "${resolved_venue_id}" --format json \
+      >"${SMOKE_DIR}/options_basket.json" 2>/dev/null; then
+      continue
+    fi
+    while IFS=$'\t' read -r item library_group; do
+      library_group="${library_group%$'\r'}"
+      if [ -z "${item}" ] || [ -z "${library_group}" ]; then
+        continue
+      fi
+      if [ "${probes}" -ge "${OPTIONS_MAX_PROBES}" ]; then
+        return 1
+      fi
+      probes=$((probes + 1))
+      "${WOLT_BIN}" venue item "${venue}" "${item}" --format json \
+        >"${SMOKE_DIR}/options_item.json" 2>/dev/null || continue
+      fixture="$(
+        jq -r '
+          (.data.option_groups // [])
+          | select(length > 0)
+          | select(all(.[]; (.required // false) == false and (.min // 0) == 0))
+          | [ .[].values[]?
+              | select(((.value_id // "") | test("^[0-9A-Fa-f]{24}$")))
+              | select(((.price // 0) | type) == "number" and .price > 0)
+            ][0]
+          | select(. != null)
+          | "\(.value_id)\t\(.price)"
+        ' "${SMOKE_DIR}/options_item.json" 2>/dev/null || true
+      )"
+      if [ -n "${fixture}" ]; then
+        printf '%s\t%s\t%s\t%s\n' "${resolved_venue_id}" "${item}" "${library_group}" "${fixture}"
+        return 0
+      fi
+    done < <(
+      jq -r --slurpfile basket "${SMOKE_DIR}/options_basket.json" '
+        ($basket[0].data.lines // [] | map(.item_id | ascii_downcase)) as $present
+        | .data.items[]?
+        | select(.is_available == true and (.is_sold_out // false) == false)
+        | select(((.base_price.amount // .price.amount // 0) > 0))
+        | select(((.option_group_ids // []) | length) == 1)
+        | select(((.item_id // "") | test("^[0-9A-Fa-f]{24}$")))
+        | select(((.option_group_ids[0] // "") | test("^[0-9A-Fa-f]{24}$")))
+        | select((.item_id | ascii_downcase) as $candidate | ($present | index($candidate)) == null)
+        | "\(.item_id)\t\(.option_group_ids[0])"
+      ' "${SMOKE_DIR}/options_menu.json" 2>/dev/null
+    )
+  done
+  return 1
+}
+
+# assert_options_line "<venue-id>" "<item-id>" "<library-group-id>"
+#   "<value-id>" "<expected-price>" "<expected-count>" "<label>" — the basket
+# line keeps the selected value under the dish's item-level group id (any
+# 24-hex id other than the library id the CLI was given) and is priced as the
+# base price plus the paid value.
+assert_options_line() {
+  local venue_id="$1" item_id="$2" library_group="$3" value_id="$4"
+  local expected_price="$5" expected_count="$6" label="$7"
+  local out="${SMOKE_DIR}/${label// /_}.json"
+  local verdict
+  printf "[%s] %-22s ... " "$(date -u +%H:%M:%S)" "${label}"
+  if ! "${WOLT_BIN}" cart --venue-id "${venue_id}" --format json \
+    >"${out}" 2>"${SMOKE_DIR}/${label// /_}.err"; then
+    printf "FAIL (cart read failed)\n"
+    fail=$((fail + 1))
+    failures+=("${label}")
+    return 1
+  fi
+  verdict="$(
+    jq -r \
+      --arg id "${item_id}" \
+      --arg library "${library_group}" \
+      --arg value "${value_id}" \
+      --argjson price "${expected_price}" \
+      --argjson count "${expected_count}" '
+      [ .data.lines[]? | select((.item_id | ascii_downcase) == ($id | ascii_downcase)) ][0]
+      | if . == null then "line missing"
+        elif .count != $count then "count \(.count), want \($count)"
+        elif .price.amount != $price then "line price \(.price.amount), want \($price)"
+        elif ((.options // []) | length) != 1 then "\((.options // []) | length) option groups, want 1"
+        elif (.options[0].id | ascii_downcase) == ($library | ascii_downcase) then "group stored under the library id, want the item-level id"
+        elif ((.options[0].id // "") | test("^[0-9A-Fa-f]{24}$") | not) then "group id is not an object id"
+        elif ([.options[0].values[]? | .id | ascii_downcase] != [$value | ascii_downcase]) then "selected value changed"
+        else "ok"
+        end
+    ' "${out}" 2>/dev/null || echo "cart could not be parsed"
+  )"
+  if [ "${verdict}" = "ok" ]; then
+    printf "ok (%s x %s c, item-level group)\n" "${expected_count}" "${expected_price}"
+    pass=$((pass + 1))
+    return 0
+  fi
+  printf "FAIL (%s)\n" "$(printf '%s' "${verdict}" | redact)"
+  fail=$((fail + 1))
+  failures+=("${label}")
+  return 1
+}
+
 # seed_config_from_env — when CI hands us the full config blob, write
 # it to ~/.wolt/.wolt-config.json with owner-only perms. Roundtrip
 # through jq so we (a) validate it's well-formed JSON before disk
@@ -952,6 +1096,80 @@ if [ "${RUN_CART_SMOKE}" = "1" ]; then
       skip_step "weighted cart price" "no orderable sell-by-weight item was available"
       skip_step "weighted checkout" "no orderable sell-by-weight item was available"
       skip_step "weighted partial rm" "no orderable sell-by-weight item was available"
+    fi
+
+    # ---- option-groups leg -----------------------------------------
+    # Restaurant dishes name their option groups by an item-level id and share
+    # the values through a library group. Basket responses list the selected
+    # values without prices. This guards the whole chain: the line keeps the
+    # item-level group id (the only id the Wolt app shows as selected), its
+    # price includes the paid value, checkout preview prices the value from the
+    # catalog, and a partial removal can rebuild the remaining line.
+    options_item_id=""
+    options_venue_id=""
+    cleanup_options_item() {
+      if [ -n "${options_item_id}" ] && [ -n "${options_venue_id}" ]; then
+        "${WOLT_BIN}" cart remove "${options_item_id}" \
+          --all \
+          --venue-id "${options_venue_id}" \
+          --format json >/dev/null 2>&1 || true
+      fi
+      cleanup_weighted_item
+    }
+    trap cleanup_options_item EXIT
+
+    options_fixture=""
+    if options_fixture="$(discover_options_fixture)"; then
+      IFS=$'\t' read -r options_fixture_venue_id options_fixture_item_id \
+        options_library_group options_value_id options_value_price <<<"${options_fixture}"
+      options_item_id="${options_fixture_item_id}"
+      options_venue_id="${options_fixture_venue_id}"
+      if cart_add_discovered \
+        "${options_fixture_venue_id}" \
+        "${options_fixture_item_id}" \
+        "${OPTIONS_COUNT}" \
+        "options cart add" \
+        --option "${options_library_group}=${options_value_id}"; then
+        options_base_price="$(
+          jq -r '.data.item_price // 0' "${SMOKE_DIR}/options_cart_add.json" 2>/dev/null || echo 0
+        )"
+        options_line_price=$((options_base_price + options_value_price))
+        assert_options_line \
+          "${options_fixture_venue_id}" "${options_fixture_item_id}" \
+          "${options_library_group}" "${options_value_id}" \
+          "${options_line_price}" "${OPTIONS_COUNT}" "options cart line" || true
+        run_validated \
+          "options checkout" \
+          is_checkout_preview_result \
+          "${WOLT_BIN}" checkout --venue-id "${options_fixture_venue_id}"
+        printf "[%s] %-22s ... " "$(date -u +%H:%M:%S)" "options partial rm"
+        if "${WOLT_BIN}" cart remove "${options_fixture_item_id}" --count 1 \
+          --venue-id "${options_fixture_venue_id}" --format json \
+          >"${SMOKE_DIR}/options_partial_remove.json" \
+          2>"${SMOKE_DIR}/options_partial_remove.err"; then
+          printf "ok (removed 1)\n"
+          pass=$((pass + 1))
+          assert_options_line \
+            "${options_fixture_venue_id}" "${options_fixture_item_id}" \
+            "${options_library_group}" "${options_value_id}" \
+            "${options_line_price}" "$((OPTIONS_COUNT - 1))" "options line after rm" || true
+        else
+          printf "FAIL\n"
+          jq -r '.error // empty | "code:    \(.code // "-")\nmessage: \(.message // "-")"' \
+            "${SMOKE_DIR}/options_partial_remove.json" 2>/dev/null | redact | sed 's/^/    | /' | head -10 || true
+          fail=$((fail + 1))
+          failures+=("options partial rm")
+        fi
+      fi
+      if "${WOLT_BIN}" cart remove "${options_fixture_item_id}" --all \
+        --venue-id "${options_fixture_venue_id}" --format json >/dev/null 2>&1; then
+        options_item_id=""
+        options_venue_id=""
+      fi
+    else
+      skip_step "options cart line" "no orderable dish with one optional option group and a paid value was available"
+      skip_step "options checkout" "no orderable dish with one optional option group and a paid value was available"
+      skip_step "options partial rm" "no orderable dish with one optional option group and a paid value was available"
     fi
   else
     fixture_status=$?
