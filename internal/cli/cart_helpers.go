@@ -231,11 +231,36 @@ func buildItemPayloadFromAssortment(assortment map[string]any, itemID string) ma
 			optionGroupIndex[strings.ToLower(groupID)] = group
 		}
 	}
+	// The basket API (and the Wolt app) key options by the item-level option id
+	// ("id"), while the shared option library is keyed by "option_id". Map one to the other.
+	itemOptionIDs := map[string]string{}
+	for _, rawOption := range asSlice(item["options"]) {
+		option := asMap(rawOption)
+		if option == nil {
+			continue
+		}
+		libraryID := strings.TrimSpace(asString(option["option_id"]))
+		itemLevelID := strings.TrimSpace(asString(option["id"]))
+		if libraryID != "" && itemLevelID != "" {
+			itemOptionIDs[strings.ToLower(libraryID)] = itemLevelID
+		}
+	}
 	optionGroups := make([]any, 0, len(optionGroupIDs))
 	for _, groupID := range optionGroupIDs {
-		if group, ok := optionGroupIndex[strings.ToLower(groupID)]; ok {
-			optionGroups = append(optionGroups, group)
+		group, ok := optionGroupIndex[strings.ToLower(groupID)]
+		if !ok {
+			continue
 		}
+		if itemLevelID, mapped := itemOptionIDs[strings.ToLower(groupID)]; mapped && !strings.EqualFold(itemLevelID, groupID) {
+			rewritten := make(map[string]any, len(group)+2)
+			for key, value := range group {
+				rewritten[key] = value
+			}
+			rewritten["id"] = itemLevelID
+			rewritten["option_id"] = groupID
+			group = rewritten
+		}
+		optionGroups = append(optionGroups, group)
 	}
 	if len(optionGroups) == 0 {
 		optionGroups = asSlice(coalesceAny(item["option_groups"], item["options"]))
@@ -327,6 +352,11 @@ func resolveOptionGroupToken(
 	}
 	if _, ok := specs[token]; ok {
 		return token, nil
+	}
+	for groupID, spec := range specs {
+		if spec.OptionID != "" && strings.EqualFold(spec.OptionID, token) {
+			return groupID, nil
+		}
 	}
 	groupIDs := make([]string, 0, len(specs))
 	for groupID := range specs {
