@@ -243,9 +243,12 @@ func buildItemPayloadFromAssortment(assortment map[string]any, itemID string) ma
 			optionGroupIndex[strings.ToLower(groupID)] = group
 		}
 	}
-	// The basket API (and the Wolt app) key options by the item-level option id
-	// ("id"), while the shared option library is keyed by "option_id". Map one to the other.
-	itemOptionIDs := map[string]string{}
+	// A dish names each option group by an item-level "id" and points at the
+	// shared option library through "option_id". The basket API and the Wolt
+	// app only recognise the item-level id, and one library group can back
+	// several groups of the same dish (pick 1, 2 or 3 toppings), so every
+	// item-level group becomes its own basket group carrying the library values.
+	itemOptionIDs := map[string][]string{}
 	for _, rawOption := range asSlice(item["options"]) {
 		option := asMap(rawOption)
 		if option == nil {
@@ -253,8 +256,9 @@ func buildItemPayloadFromAssortment(assortment map[string]any, itemID string) ma
 		}
 		libraryID := strings.TrimSpace(asString(option["option_id"]))
 		itemLevelID := strings.TrimSpace(asString(option["id"]))
-		if libraryID != "" && itemLevelID != "" {
-			itemOptionIDs[strings.ToLower(libraryID)] = itemLevelID
+		if libraryID != "" && itemLevelID != "" && !strings.EqualFold(libraryID, itemLevelID) {
+			key := strings.ToLower(libraryID)
+			itemOptionIDs[key] = append(itemOptionIDs[key], itemLevelID)
 		}
 	}
 	optionGroups := make([]any, 0, len(optionGroupIDs))
@@ -263,16 +267,20 @@ func buildItemPayloadFromAssortment(assortment map[string]any, itemID string) ma
 		if !ok {
 			continue
 		}
-		if itemLevelID, mapped := itemOptionIDs[strings.ToLower(groupID)]; mapped && !strings.EqualFold(itemLevelID, groupID) {
+		itemLevelIDs := itemOptionIDs[strings.ToLower(groupID)]
+		if len(itemLevelIDs) == 0 {
+			optionGroups = append(optionGroups, group)
+			continue
+		}
+		for _, itemLevelID := range itemLevelIDs {
 			rewritten := make(map[string]any, len(group)+2)
 			for key, value := range group {
 				rewritten[key] = value
 			}
 			rewritten["id"] = itemLevelID
 			rewritten["option_id"] = groupID
-			group = rewritten
+			optionGroups = append(optionGroups, rewritten)
 		}
-		optionGroups = append(optionGroups, group)
 	}
 	if len(optionGroups) == 0 {
 		optionGroups = asSlice(coalesceAny(item["option_groups"], item["options"]))
@@ -365,10 +373,24 @@ func resolveOptionGroupToken(
 	if _, ok := specs[token]; ok {
 		return token, nil
 	}
+	libraryMatches := []string{}
 	for groupID, spec := range specs {
 		if spec.OptionID != "" && strings.EqualFold(spec.OptionID, token) {
-			return groupID, nil
+			libraryMatches = append(libraryMatches, groupID)
 		}
+	}
+	switch len(libraryMatches) {
+	case 0:
+	case 1:
+		return libraryMatches[0], nil
+	default:
+		sort.Strings(libraryMatches)
+		return "", fmt.Errorf(
+			"option group %q is shared by %d groups of this item; use one of their IDs: %s",
+			token,
+			len(libraryMatches),
+			strings.Join(libraryMatches, ", "),
+		)
 	}
 	groupIDs := make([]string, 0, len(specs))
 	for groupID := range specs {
